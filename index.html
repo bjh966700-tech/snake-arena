@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Snake Arena</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#0b0f1a;color:#fff;
+    font-family:system-ui,-apple-system,"Segoe UI","Noto Sans KR","Malgun Gothic",sans-serif;
+    user-select:none;-webkit-user-select:none;touch-action:none}
+  canvas{display:block;cursor:crosshair}
+  #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(ellipse at center,rgba(10,14,28,.55),rgba(5,7,15,.85));z-index:10;padding:16px}
+  #overlay.hidden{display:none}
+  .card{width:100%;max-width:420px;text-align:center;padding:32px 26px;border-radius:22px;
+    background:rgba(20,26,46,.85);border:1px solid rgba(255,255,255,.08);
+    box-shadow:0 20px 60px rgba(0,0,0,.5);backdrop-filter:blur(8px)}
+  h1{font-size:40px;letter-spacing:1px;margin-bottom:6px;
+    background:linear-gradient(90deg,#5ef0a8,#4cc3ff,#b77cff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:#9aa6c4;margin-bottom:20px;font-size:15px}
+  #result{margin-bottom:18px;padding:14px;border-radius:14px;background:rgba(255,80,110,.12);
+    border:1px solid rgba(255,80,110,.3);font-size:15px;line-height:1.7}
+  #result b{color:#ffd166;font-size:18px}
+  #name{width:100%;padding:14px 16px;border-radius:12px;border:1px solid rgba(255,255,255,.15);
+    background:rgba(0,0,0,.35);color:#fff;font-size:17px;outline:none;text-align:center;margin-bottom:12px}
+  #name:focus{border-color:#4cc3ff}
+  #play{width:100%;padding:14px;border:none;border-radius:12px;font-size:19px;font-weight:700;color:#08111f;
+    background:linear-gradient(90deg,#5ef0a8,#4cc3ff);cursor:pointer;transition:transform .1s}
+  #play:hover{transform:scale(1.02)}
+  #play:active{transform:scale(.98)}
+  .help{margin-top:18px;color:#8390ad;font-size:13px;line-height:1.7}
+  #boostBtn{position:fixed;left:22px;bottom:22px;width:88px;height:88px;border-radius:50%;
+    border:2px solid rgba(255,255,255,.35);background:rgba(255,120,60,.35);color:#fff;font-weight:800;
+    font-size:15px;z-index:5;display:none;touch-action:none}
+  #boostBtn.on{background:rgba(255,120,60,.75)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="overlay">
+  <div class="card">
+    <h1>Snake Arena</h1>
+    <p class="sub">먹고, 자라고, 살아남아라!</p>
+    <div id="result" hidden></div>
+    <input id="name" maxlength="14" placeholder="닉네임을 입력하세요" autocomplete="off">
+    <button id="play">플레이</button>
+    <div class="help">
+      🖱️ 마우스로 방향 조종 · 클릭 / 스페이스바 길게 = 부스트<br>
+      📱 화면을 터치해 조종 · BOOST 버튼으로 가속<br>
+      머리가 다른 뱀 몸에 닿으면 죽어요.<br>내 몸으로 길을 막아 상대를 쓰러뜨리세요!
+    </div>
+  </div>
+</div>
+<button id="boostBtn">BOOST</button>
+
+<script>
+(() => {
+  // ---------- 기본 설정 ----------
+  const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  const overlay = document.getElementById('overlay'), resultEl = document.getElementById('result');
+  const nameIn = document.getElementById('name'), playBtn = document.getElementById('play');
+  const boostBtn = document.getElementById('boostBtn');
+  let W, H, DPR;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  }
+  addEventListener('resize', resize); resize();
+
+  const TAU = Math.PI * 2;
+  const WORLD_R = 3000, FOOD_COUNT = 1700, FOOD_MAX = 4500, BOT_COUNT = 22;
+  const NAMES = ['슬리더','꿈틀이','Viper','Noodle','뱀뱀','Python','Mamba','왕뱀','Cobra','Zigzag',
+    '초코뱀','Slinky','Rattle','지렁이킹','Neon','Kaa','Boa','Wiggle','Spaghetti','민트뱀','Shadow','Blitz',
+    'Pixel','Comet','망고','Hydra','Orbit','Tornado'];
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  function adiff(a, b) { let d = a - b; while (d > Math.PI) d -= TAU; while (d < -Math.PI) d += TAU; return d; }
+  function randPoint(maxR) { const a = Math.random() * TAU, r = Math.sqrt(Math.random()) * maxR; return { x: Math.cos(a) * r, y: Math.sin(a) * r }; }
+
+  let foods = [], snakes = [], player = null;
+  let state = 'menu', deathTimer = 0, spawnTimer = 0, time = 0;
+  const cam = { x: 0, y: 0, zoom: 1 };
+  let mx = 0, my = 0, boosting = false;
+  let best = 0; try { best = +localStorage.getItem('snakeArenaBest') || 0; } catch (e) {}
+
+  // ---------- 먹이 ----------
+  function makeFood(x, y, v, hue) {
+    return { x, y, v, r: 3 + Math.sqrt(v) * 2.4, c: `hsl(${hue},95%,63%)`, ph: Math.random() * TAU, dead: false };
+  }
+  function spawnFood() { const p = randPoint(WORLD_R - 30); foods.push(makeFood(p.x, p.y, rand(0.6, 1.8), Math.random() * 360 | 0)); }
+
+  // ---------- 뱀 ----------
+  class Snake {
+    constructor(name, hue, isBot, x, y, score = 10) {
+      this.name = name; this.hue = hue; this.isBot = isBot;
+      this.score = score; this.kills = 0; this.alive = true;
+      this.angle = Math.random() * TAU; this.target = this.angle;
+      this.boost = false; this.boosting = false; this.dropT = 0;
+      this.ai = { t: 0, scan: Math.random() * 4, wander: this.angle, food: null, avoid: 0, hunt: 0 };
+      this.pts = [];
+      const n = this.segTarget(), s = this.spacing;
+      for (let i = 0; i < n; i++) this.pts.push({ x: x - Math.cos(this.angle) * i * s, y: y - Math.sin(this.angle) * i * s });
+      this.body = `hsl(${hue},85%,58%)`; this.stripe = `hsl(${hue},78%,46%)`;
+      this.outline = `hsl(${hue},70%,22%)`; this.glow = `hsl(${hue},100%,70%)`;
+    }
+    get radius() { return Math.min(9 + Math.sqrt(this.score) * 0.6, 32); }
+    get spacing() { return this.radius * 0.55; }
+    segTarget() { return Math.min(700, Math.floor(10 + this.score / 3.5)); }
+
+    update(dt) {
+      const r = this.radius;
+      this.boosting = this.boost && this.score > 12;
+      let ts = (0.115 - r * 0.0016) * dt; if (this.boosting) ts *= 0.85;
+      this.angle += clamp(adiff(this.target, this.angle), -ts, ts);
+      const sp = (this.boosting ? 6.4 : 3.2) * dt;
+      const h = this.pts[0];
+      h.x += Math.cos(this.angle) * sp; h.y += Math.sin(this.angle) * sp;
+      const s = this.spacing;
+      for (let i = 1; i < this.pts.length; i++) {
+        const a = this.pts[i - 1], b = this.pts[i];
+        const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+        if (d > s) { const k = s / d; b.x = a.x + dx * k; b.y = a.y + dy * k; }
+      }
+      const n = this.segTarget();
+      while (this.pts.length < n) { const t = this.pts[this.pts.length - 1]; this.pts.push({ x: t.x, y: t.y }); }
+      while (this.pts.length > n) this.pts.pop();
+      if (this.boosting) {
+        this.score -= 0.07 * dt; this.dropT += dt;
+        if (this.dropT > 7) {
+          this.dropT = 0; const t = this.pts[this.pts.length - 1];
+          foods.push(makeFood(t.x + rand(-4, 4), t.y + rand(-4, 4), 0.4, this.hue));
+        }
+      }
+    }
+
+    die() {
+      this.alive = false;
+      const n = this.pts.length, step = 2, cnt = Math.ceil(n / step);
+      const v = clamp(this.score * 0.8 / cnt, 0.8, 10), r = this.radius;
+      for (let i = 0; i < n; i += step) {
+        const p = this.pts[i];
+        foods.push(makeFood(p.x + rand(-r, r) * 0.7, p.y + rand(-r, r) * 0.7, v * rand(0.8, 1.2), this.hue));
+      }
+    }
+
+    think(dt) {
+      const ai = this.ai, h = this.pts[0], r = this.radius;
+      ai.t -= dt; ai.scan -= dt;
+      // 벽 회피
+      if (Math.hypot(h.x, h.y) > WORLD_R - 260 - r * 4) {
+        this.target = Math.atan2(-h.y, -h.x); this.boost = false; ai.food = null; return;
+      }
+      // 장애물(다른 뱀) 회피
+      if (ai.scan <= 0) {
+        ai.scan = 4;
+        const look = r * 2.6 + 45, rad = r + 12;
+        const probe = a => dangerAt(this, h.x + Math.cos(a) * look, h.y + Math.sin(a) * look, rad);
+        if (probe(this.angle) || probe(this.angle - 0.45) || probe(this.angle + 0.45)) {
+          const L = this.angle - 1.2, R = this.angle + 1.2, dl = probe(L), dr = probe(R);
+          if (!dl && dr) this.target = L;
+          else if (dl && !dr) this.target = R;
+          else if (dl && dr) this.target = this.angle + Math.PI;
+          else this.target = Math.random() < 0.5 ? L : R;
+          ai.avoid = 16; ai.food = null; ai.hunt = 0; this.boost = false; return;
+        }
+      }
+      if (ai.avoid > 0) { ai.avoid -= dt; return; }
+      // 가끔 플레이어 사냥 (앞을 가로막기)
+      if (player && player.alive && ai.hunt <= 0 && this.score > player.score * 1.3 && Math.random() < 0.004) {
+        const ph = player.pts[0];
+        if (Math.hypot(ph.x - h.x, ph.y - h.y) < 450) ai.hunt = 100;
+      }
+      if (ai.hunt > 0 && player && player.alive) {
+        ai.hunt -= dt;
+        const ph = player.pts[0], tx = ph.x + Math.cos(player.angle) * 160, ty = ph.y + Math.sin(player.angle) * 160;
+        this.target = Math.atan2(ty - h.y, tx - h.x); this.boost = this.score > 40; return;
+      }
+      // 먹이 찾기
+      if (ai.food) {
+        const f = ai.food, d = Math.hypot(f.x - h.x, f.y - h.y), ang = Math.atan2(f.y - h.y, f.x - h.x);
+        if (f.dead || (d < r * 3.5 && Math.abs(adiff(ang, this.angle)) > 1.4)) ai.food = null;
+      }
+      if (ai.t <= 0 || !ai.food) {
+        ai.t = rand(15, 40); ai.food = null; let bestS = 0;
+        for (let i = 0; i < foods.length; i++) {
+          const f = foods[i], dx = f.x - h.x, dy = f.y - h.y;
+          if (dx > 450 || dx < -450 || dy > 450 || dy < -450) continue;
+          const d = Math.hypot(dx, dy);
+          if (d < r * 3.5 && Math.abs(adiff(Math.atan2(dy, dx), this.angle)) > 1.4) continue;
+          const sc = f.v / (d + 40);
+          if (sc > bestS) { bestS = sc; ai.food = f; }
+        }
+        if (!ai.food) ai.wander = this.angle + rand(-1, 1);
+        this.boost = !!(ai.food && ai.food.v > 3 && this.score > 30 && Math.random() < 0.5);
+      }
+      this.target = ai.food ? Math.atan2(ai.food.y - h.y, ai.food.x - h.x) : ai.wander;
+    }
+  }
+
+  function dangerAt(self, x, y, rad) {
+    if (Math.hypot(x, y) > WORLD_R - rad) return true;
+    for (const o of snakes) {
+      if (!o.alive || o === self) continue;
+      const oh = o.pts[0], ext = o.pts.length * o.spacing + o.radius + rad;
+      if (Math.abs(oh.x - x) > ext || Math.abs(oh.y - y) > ext) continue;
+      const rr = (o.radius + rad) ** 2;
+      for (let i = 0; i < o.pts.length; i += 2) {
+        const p = o.pts[i], dx = p.x - x, dy = p.y - y;
+        if (dx * dx + dy * dy < rr) return true;
+      }
+    }
+    return false;
+  }
+
+  function spawnBot() {
+    let p;
+    for (let k = 0; k < 20; k++) {
+      p = randPoint(WORLD_R - 400);
+      if (!player || !player.alive || Math.hypot(p.x - player.pts[0].x, p.y - player.pts[0].y) > 900) break;
+    }
+    const score = 10 + Math.random() ** 2 * 320;
+    snakes.push(new Snake(NAMES[Math.random() * NAMES.length | 0], Math.random() * 360 | 0, true, p.x, p.y, score));
+  }
+
+  function safeSpawn() {
+    let best = null, bestD = -1;
+    for (let k = 0; k < 30; k++) {
+      const p = randPoint(WORLD_R * 0.6); let md = Infinity;
+      for (const s of snakes) for (let i = 0; i < s.pts.length; i += 4)
+        md = Math.min(md, Math.hypot(s.pts[i].x - p.x, s.pts[i].y - p.y));
+      if (md > bestD) { bestD = md; best = p; }
+      if (md > 600) break;
+    }
+    return best;
+  }
+
+  // ---------- 초기화 ----------
+  for (let i = 0; i < FOOD_COUNT; i++) spawnFood();
+  for (let i = 0; i < BOT_COUNT; i++) spawnBot();
+
+  function startGame() {
+    const name = nameIn.value.trim() || 'Player';
+    try { localStorage.setItem('snakeArenaName', name); } catch (e) {}
+    const p = safeSpawn();
+    player = new Snake(name, Math.random() * 360 | 0, false, p.x, p.y);
+    player.maxScore = player.score; player.bestRank = 99;
+    snakes.push(player);
+    cam.x = p.x; cam.y = p.y;
+    state = 'playing'; boosting = false;
+    overlay.classList.add('hidden');
+    mx = W / 2 + Math.cos(player.angle) * 100; my = H / 2 + Math.sin(player.angle) * 100;
+  }
+  try { nameIn.value = localStorage.getItem('snakeArenaName') || ''; } catch (e) {}
+  playBtn.addEventListener('click', startGame);
+  nameIn.addEventListener('keydown', e => { if (e.key === 'Enter') startGame(); });
+
+  function showGameOver() {
+    const len = Math.floor(player.maxScore);
+    if (len > best) { best = len; try { localStorage.setItem('snakeArenaBest', best); } catch (e) {} }
+    resultEl.hidden = false;
+    resultEl.innerHTML = `💀 게임 오버!<br>최고 길이 <b>${len}</b> · 처치 <b>${player.kills}</b> · 최고 순위 <b>#${player.bestRank}</b><br><span style="color:#9aa6c4;font-size:13px">개인 최고 기록: ${best}</span>`;
+    playBtn.textContent = '다시 하기';
+    overlay.classList.remove('hidden');
+    setTimeout(() => nameIn.focus(), 50);
+  }
+
+  // ---------- 입력 ----------
+  cv.addEventListener('pointermove', e => { mx = e.clientX; my = e.clientY; });
+  cv.addEventListener('pointerdown', e => { mx = e.clientX; my = e.clientY; if (e.pointerType === 'mouse') boosting = true; });
+  addEventListener('pointerup', e => { if (e.pointerType === 'mouse') boosting = false; });
+  addEventListener('keydown', e => { if (e.code === 'Space' && state === 'playing') { boosting = true; e.preventDefault(); } });
+  addEventListener('keyup', e => { if (e.code === 'Space') boosting = false; });
+  addEventListener('contextmenu', e => e.preventDefault());
+  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) boostBtn.style.display = 'block';
+  const bOn = e => { e.preventDefault(); e.stopPropagation(); boosting = true; boostBtn.classList.add('on'); };
+  const bOff = e => { e.preventDefault(); e.stopPropagation(); boosting = false; boostBtn.classList.remove('on'); };
+  boostBtn.addEventListener('pointerdown', bOn);
+  boostBtn.addEventListener('pointerup', bOff);
+  boostBtn.addEventListener('pointercancel', bOff);
+  boostBtn.addEventListener('pointerleave', bOff);
+
+  // ---------- 업데이트 ----------
+  function update(dt) {
+    time += dt;
+    if (player && player.alive) {
+      const h = player.pts[0];
+      const sx = W / 2 + (h.x - cam.x) * cam.zoom, sy = H / 2 + (h.y - cam.y) * cam.zoom;
+      if (Math.hypot(mx - sx, my - sy) > 4) player.target = Math.atan2(my - sy, mx - sx);
+      player.boost = boosting;
+    }
+    for (const s of snakes) if (s.alive) { if (s.isBot) s.think(dt); s.update(dt); }
+
+    // 먹이 먹기 + 자석 효과
+    for (const s of snakes) {
+      if (!s.alive) continue;
+      const h = s.pts[0], r = s.radius, mag = r * 2.5 + 25, eat = r + 4;
+      const pull = Math.min(0.14 * dt, 0.6);
+      for (let i = 0; i < foods.length; i++) {
+        const f = foods[i], dx = h.x - f.x, dy = h.y - f.y;
+        if (dx > mag || dx < -mag || dy > mag || dy < -mag) continue;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < (eat + f.r) ** 2) {
+          s.score += f.v; f.dead = true;
+          foods[i] = foods[foods.length - 1]; foods.pop(); i--; continue;
+        }
+        if (d2 < mag * mag) { f.x += dx * pull; f.y += dy * pull; }
+      }
+    }
+
+    // 충돌
+    const dead = [];
+    for (const s of snakes) {
+      if (!s.alive) continue;
+      const h = s.pts[0];
+      if (Math.hypot(h.x, h.y) > WORLD_R - s.radius * 0.6) { dead.push([s, null]); continue; }
+      for (const o of snakes) {
+        if (!o.alive || o === s) continue;
+        const oh = o.pts[0], ext = o.pts.length * o.spacing + o.radius + s.radius;
+        if (Math.abs(oh.x - h.x) > ext || Math.abs(oh.y - h.y) > ext) continue;
+        const hr = s.radius * 0.6 + o.radius * 0.85, rr = hr * hr;
+        let hit = false;
+        for (let i = 0; i < o.pts.length; i++) {
+          const p = o.pts[i], dx = p.x - h.x, dy = p.y - h.y;
+          if (dx * dx + dy * dy < rr) { hit = true; break; }
+        }
+        if (hit) { dead.push([s, o]); break; }
+      }
+    }
+    for (const [s, o] of dead) if (s.alive) { s.die(); if (o) o.kills++; }
+    snakes = snakes.filter(s => s.alive);
+
+    // 플레이어 상태
+    if (player) {
+      if (player.alive) {
+        player.maxScore = Math.max(player.maxScore, player.score);
+        const rank = snakes.slice().sort((a, b) => b.score - a.score).indexOf(player) + 1;
+        player.bestRank = Math.min(player.bestRank, rank);
+      } else if (state === 'playing') { state = 'dead'; deathTimer = 75; boosting = false; }
+    }
+    if (state === 'dead') { deathTimer -= dt; if (deathTimer <= 0) { state = 'over'; showGameOver(); } }
+
+    // 봇 / 먹이 보충
+    spawnTimer -= dt;
+    if (snakes.filter(s => s.isBot).length < BOT_COUNT && spawnTimer <= 0) { spawnBot(); spawnTimer = 50; }
+    for (let k = 0; k < 15 && foods.length < FOOD_COUNT; k++) spawnFood();
+    if (foods.length > FOOD_MAX) foods.splice(0, foods.length - FOOD_MAX);
+
+    // 카메라
+    let tgt = null;
+    if (player && player.alive) tgt = player;
+    else if (state === 'menu' || state === 'over') tgt = snakes.reduce((a, b) => (!a || b.score > a.score ? b : a), null);
+    const base = clamp(Math.min(W, H) / 820, 0.55, 1.15);
+    if (tgt) {
+      const k = 1 - Math.pow(0.8, dt);
+      cam.x += (tgt.pts[0].x - cam.x) * k; cam.y += (tgt.pts[0].y - cam.y) * k;
+      const zt = base * Math.max(0.5, 1 - (tgt.radius - 11) * 0.022);
+      cam.zoom += (zt - cam.zoom) * 0.04 * dt;
+    }
+  }
+
+  // ---------- 그리기 ----------
+  const tile = document.createElement('canvas'); tile.width = tile.height = 52;
+  (() => {
+    const g = tile.getContext('2d');
+    g.fillStyle = '#111729'; g.fillRect(0, 0, 52, 52);
+    g.strokeStyle = 'rgba(255,255,255,0.035)'; g.lineWidth = 1; g.strokeRect(0.5, 0.5, 52, 52);
+    g.fillStyle = 'rgba(120,160,255,0.12)'; g.beginPath(); g.arc(26, 26, 2.2, 0, TAU); g.fill();
+  })();
+  const bgPattern = ctx.createPattern(tile, 'repeat');
+
+  function drawSnake(s, x0, x1, y0, y1) {
+    const r = s.radius, pts = s.pts, z = cam.zoom;
+    if (s.boosting) {
+      ctx.globalAlpha = 0.18 + Math.sin(time * 0.3) * 0.06; ctx.fillStyle = s.glow;
+      for (let i = pts.length - 1; i >= 0; i -= 2) {
+        const p = pts[i]; if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.7, 0, TAU); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i]; if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue;
+      ctx.fillStyle = s.outline; ctx.beginPath(); ctx.arc(p.x, p.y, r + 1.6, 0, TAU); ctx.fill();
+      ctx.fillStyle = ((i / 4) | 0) % 2 ? s.stripe : s.body;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fill();
+    }
+    // 눈
+    const h = pts[0], a = s.angle, ex = Math.cos(a), ey = Math.sin(a), px = -ey, py = ex;
+    const look = s.isBot ? s.angle : s.target;
+    for (const side of [-1, 1]) {
+      const cx = h.x + ex * r * 0.35 + px * r * 0.48 * side, cy = h.y + ey * r * 0.35 + py * r * 0.48 * side;
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, cy, r * 0.4, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#111'; ctx.beginPath();
+      ctx.arc(cx + Math.cos(look) * r * 0.16, cy + Math.sin(look) * r * 0.16, r * 0.22, 0, TAU); ctx.fill();
+    }
+    // 이름
+    ctx.font = `600 ${Math.round(13 / Math.max(z, 0.6))}px system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.fillStyle = s === player ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.6)';
+    ctx.fillText(s.name, h.x, h.y - r - 12);
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#1c0b14'; ctx.fillRect(0, 0, W, H);
+    const z = cam.zoom;
+    ctx.setTransform(DPR * z, 0, 0, DPR * z, DPR * (W / 2 - cam.x * z), DPR * (H / 2 - cam.y * z));
+    ctx.beginPath(); ctx.arc(0, 0, WORLD_R, 0, TAU);
+    ctx.fillStyle = bgPattern; ctx.fill();
+    ctx.lineWidth = 14; ctx.strokeStyle = 'rgba(255,60,95,0.6)'; ctx.stroke();
+
+    const pad = 60;
+    const x0 = cam.x - W / 2 / z - pad, x1 = cam.x + W / 2 / z + pad;
+    const y0 = cam.y - H / 2 / z - pad, y1 = cam.y + H / 2 / z + pad;
+
+    for (const f of foods) {
+      if (f.x < x0 || f.x > x1 || f.y < y0 || f.y > y1) continue;
+      const pulse = 1 + Math.sin(time * 0.08 + f.ph) * 0.15;
+      ctx.fillStyle = f.c;
+      ctx.globalAlpha = 0.22; ctx.beginPath(); ctx.arc(f.x, f.y, f.r * 2.3 * pulse, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(f.x, f.y, f.r * pulse, 0, TAU); ctx.fill();
+    }
+    for (const s of snakes) if (s !== player) drawSnake(s, x0, x1, y0, y1);
+    if (player && player.alive) drawSnake(player, x0, x1, y0, y1);
+
+    drawUI();
+  }
+
+  function drawUI() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const small = W < 600;
+    // 리더보드
+    const sorted = snakes.slice().sort((a, b) => b.score - a.score);
+    const lbW = small ? 160 : 210, rowH = small ? 18 : 21, rows = Math.min(10, sorted.length);
+    const lx = W - lbW - 14, ly = 14;
+    ctx.fillStyle = 'rgba(10,14,28,0.55)';
+    roundRect(lx, ly, lbW, 38 + rows * rowH + 6, 12); ctx.fill();
+    ctx.font = `700 ${small ? 13 : 15}px system-ui,sans-serif`; ctx.textAlign = 'center'; ctx.fillStyle = '#ffd166';
+    ctx.fillText('🏆 리더보드', lx + lbW / 2, ly + 25);
+    ctx.font = `${small ? 12 : 13}px system-ui,sans-serif`;
+    for (let i = 0; i < rows; i++) {
+      const s = sorted[i], y = ly + 48 + i * rowH;
+      ctx.fillStyle = s === player ? '#5ef0a8' : 'rgba(255,255,255,0.8)';
+      ctx.textAlign = 'left'; ctx.fillText(`${i + 1}. ${s.name}`.slice(0, 16), lx + 12, y);
+      ctx.textAlign = 'right'; ctx.fillText(Math.floor(s.score), lx + lbW - 12, y);
+    }
+    if (player && player.alive) {
+      const rank = sorted.indexOf(player) + 1;
+      if (rank > 10) {
+        ctx.fillStyle = '#5ef0a8'; ctx.textAlign = 'center';
+        ctx.fillText(`내 순위 #${rank}`, lx + lbW / 2, ly + 38 + rows * rowH + 24);
+      }
+      // 점수
+      const sx = boostBtn.style.display === 'block' ? 126 : 18;
+      ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.font = `800 ${small ? 20 : 24}px system-ui,sans-serif`;
+      ctx.fillText(`길이 ${Math.floor(player.score)}`, sx, H - 46);
+      ctx.font = `${small ? 13 : 15}px system-ui,sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.fillText(`처치 ${player.kills} · 순위 #${rank} / ${snakes.length}`, sx, H - 22);
+    }
+    // 미니맵
+    const mr = small ? 48 : 64, mcx = W - mr - 18, mcy = H - mr - 18;
+    ctx.fillStyle = 'rgba(10,14,28,0.6)'; ctx.beginPath(); ctx.arc(mcx, mcy, mr, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,60,95,0.6)'; ctx.lineWidth = 2; ctx.stroke();
+    const k = mr / WORLD_R;
+    for (const s of snakes) {
+      if (s === player) continue;
+      ctx.fillStyle = `hsla(${s.hue},80%,60%,0.6)`;
+      ctx.beginPath(); ctx.arc(mcx + s.pts[0].x * k, mcy + s.pts[0].y * k, 1.6, 0, TAU); ctx.fill();
+    }
+    if (player && player.alive) {
+      ctx.fillStyle = '#fff'; ctx.beginPath();
+      ctx.arc(mcx + player.pts[0].x * k, mcy + player.pts[0].y * k, 3.5, 0, TAU); ctx.fill();
+    }
+  }
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  // ---------- 루프 ----------
+  let last = performance.now();
+  function loop(now) {
+    let dt = (now - last) / 16.667; last = now;
+    if (dt > 3) dt = 3;
+    update(dt); render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  setTimeout(() => nameIn.focus(), 100);
+})();
+</script>
+</body>
+</html>
